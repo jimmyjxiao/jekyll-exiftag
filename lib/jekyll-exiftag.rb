@@ -1,84 +1,78 @@
-# -*- coding: utf-8 -*-
-# A LiquidTag to get Exif Tags using EXIFR
-# by: Beni Buess
-#
-#
-# Usage:
-#
-# {% exiftag tagname,[source],[file] %}
-#
-# Everything given as tagname is called on EXIFR::JPEG, so this could be model oder f_number.to_f (see https://github.com/remvee/exifr)
-# If you give a source, this source is used build the fullpath for the given file (you can also configure them in _config.yml, see below)
-# If the file is given, this is the file to get Exif Tags for, this can be alternatively defined in the YAML Front Matter as img: file
-#
-#
-# Configuration:
-#
-# Put this in your _config.yml
-#
-# exiftag:
-#  sources:
-#    - photos
-#    - photos/other_source
-#
-# These paths are relative to your sites root. Don't add leading and trailing slashes.
-#
-
-require 'exifr'
+require 'mini_magick'
 
 module Jekyll
-  class ExifTag < Liquid::Tag
-    def initialize(tag_name, params, token)
-      super
-      @args = self.split_params(params)
+  module JekyllMinimagick
+
+    class GeneratedImageFile < Jekyll::StaticFile
+      # Initialize a new GeneratedImage.
+      #   +site+ is the Site
+      #   +base+ is the String path to the <source>
+      #   +dir+ is the String path between <source> and the file
+      #   +name+ is the String filename of the file
+      #   +preset+ is the Preset hash from the config.
+      #
+      # Returns <GeneratedImageFile>
+      def initialize(site, base, dir, name, preset)
+        @site = site
+        @base = base
+        @dir  = dir
+        @name = name
+        @dst_dir = preset.delete('destination')
+        @src_dir = preset.delete('source')
+        @commands = preset
+      end
+
+      # Obtains source file path by substituting the preset's source directory
+      # for the destination directory.
+      #
+      # Returns source file path.
+      def path
+        File.join(@base, @dir.sub(@dst_dir, @src_dir), @name)
+      end
+
+      # Use MiniMagick to create a derivative image at the destination
+      # specified (if the original is modified).
+      #   +dest+ is the String path to the destination dir
+      #
+      # Returns false if the file was not modified since last time (no-op).
+      def write(dest)
+        dest_path = destination(dest)
+
+        return false if File.exist? dest_path and !modified?
+        self.class.mtimes[path] = mtime
+
+        FileUtils.mkdir_p(File.dirname(dest_path))
+        image = ::MiniMagick::Image.open(path)
+        image.combine_options do |c|
+          @commands.each_pair do |command, arg|
+            c.send command, arg
+          end
+        end
+        image.write dest_path
+
+        true
+      end
+
     end
 
-    def render(context)
-      sources = Array.new()
-      if context.registers[:site].config['exiftag'] and context.registers[:site].config['exiftag']['sources']
-        sources.unshift(*context.registers[:site].config['exiftag']['sources'])
-      end
+    class MiniMagickGenerator < Generator
+      safe true
 
-      # first param is the exif tag
-      tag = @args[0]
+      # Find all image files in the source directories of the presets specified
+      # in the site config.  Add a GeneratedImageFile to the static_files stack
+      # for later processing.
+      def generate(site)
+        return unless site.config['mini_magick']
 
-      # if a second parameter is passed, use it as a possible img source
-      if @args.count > 1
-        src = Liquid::Template.parse(@args[1]).render context
-        sources.unshift(src)
-      end
-
-      # the image can be passed as the third parameter
-      if @args.count > 2
-        img = Liquid::Template.parse(@args[2]).render context
-      # or be defined in the YAML Front Matter like img: <file>
-      else
-        img = context.environments.first["page"]["img"]
-      end
-
-      # first check if the given img is already the path
-      if File.exist?(img)
-        file_name = img
-      else
-      # then start testing with the sources from _config.yml
-        begin
-          source = sources.shift
-          file_name = File.join(context.registers[:site].config['source'], source, img)
-        end until File.exist?(file_name) or sources.count == 0
-      end
-      # try it and return empty string on failure
-      begin
-        exif = EXIFR::JPEG::new(file_name)
-        return tag.split('.').inject(exif){|o,m| o.send(m)}
-      rescue
-        ""
+        site.config['mini_magick'].each_pair do |name, preset|
+          Dir.chdir preset['source'] do
+           Dir.glob(File.join("**", "*.{png,jpg,jpeg,gif}")) do |source|
+              site.static_files << GeneratedImageFile.new(site, site.source, preset['destination'], source, preset.clone)
+             end
+          end
+        end
       end
     end
 
-    def split_params(params)
-      params.split(",").map(&:strip)
-    end
   end
 end
-
-Liquid::Template.register_tag('exiftag', Jekyll::ExifTag)
